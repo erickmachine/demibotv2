@@ -747,7 +747,7 @@ async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(CONFIG.sessionPath)
   const { version } = await fetchLatestBaileysVersion()
 
-  sock = makeWASocket({
+   sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: true,
@@ -756,6 +756,14 @@ async function startBot() {
     generateHighQualityLinkPreview: true,
     syncFullHistory: false,
     markOnlineOnConnect: true,
+    retryRequestDelayMs: 250,
+    getMessage: async (key) => {
+      if (store) {
+        const msg = await store.loadMessage(key.remoteJid, key.id)
+        return msg?.message || undefined
+      }
+      return { conversation: '' }
+    },
   })
 
   store.bind(sock.ev)
@@ -1181,22 +1189,41 @@ async function handleMessage(msg) {
 
   incrementStat('commandsProcessed')
 
-  // Mentioned users
-  const mentionedJid = msg.message.extendedTextMessage?.contextInfo?.mentionedJid || []
-  const quotedMsg = msg.message.extendedTextMessage?.contextInfo?.quotedMessage
-  const quotedParticipant = msg.message.extendedTextMessage?.contextInfo?.participant
-
-  // Helper para responder
+   // Helper para responder (com retry para erro "No sessions")
   const reply = async (txt) => {
-    await sock.sendMessage(chatId, { text: txt }, { quoted: msg }).catch((e) => {
-      console.error('[DEMI BOT] Erro ao responder:', e.message)
-    })
+    try {
+      await sock.sendMessage(chatId, { text: txt }, { quoted: msg })
+    } catch (e) {
+      if (e.message === 'No sessions' || e.message?.includes('session')) {
+        console.log('[DEMI BOT] Sessao nao encontrada, tentando reenviar para:', chatId)
+        try {
+          await delay(1500)
+          await sock.sendMessage(chatId, { text: txt })
+        } catch (e2) {
+          console.error('[DEMI BOT] Falha no retry:', e2.message)
+        }
+      } else {
+        console.error('[DEMI BOT] Erro ao responder:', e.message)
+      }
+    }
   }
 
   const replyMention = async (txt, mentions = []) => {
-    await sock.sendMessage(chatId, { text: txt, mentions }, { quoted: msg }).catch((e) => {
-      console.error('[DEMI BOT] Erro ao responder com mention:', e.message)
-    })
+    try {
+      await sock.sendMessage(chatId, { text: txt, mentions }, { quoted: msg })
+    } catch (e) {
+      if (e.message === 'No sessions' || e.message?.includes('session')) {
+        console.log('[DEMI BOT] Sessao nao encontrada (mention), tentando reenviar para:', chatId)
+        try {
+          await delay(1500)
+          await sock.sendMessage(chatId, { text: txt, mentions })
+        } catch (e2) {
+          console.error('[DEMI BOT] Falha no retry mention:', e2.message)
+        }
+      } else {
+        console.error('[DEMI BOT] Erro ao responder com mention:', e.message)
+      }
+    }
   }
 
   // ============================================
