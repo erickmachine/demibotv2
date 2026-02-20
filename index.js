@@ -43,11 +43,27 @@ const execAsync = promisify(exec)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
+// Silenciar erros de decrypt do Baileys (Bad MAC / session errors)
+// Esses erros sao normais quando a sessao esta sendo re-estabelecida
+const _origConsoleError = console.error
+console.error = (...args) => {
+  const msg = args[0]?.toString?.() || ''
+  if (
+    msg.includes('Bad MAC') ||
+    msg.includes('Failed to decrypt') ||
+    msg.includes('Closing open session') ||
+    msg.includes('Closing session') ||
+    msg.includes('Session error')
+  ) return
+  _origConsoleError.apply(console, args)
+}
+
 // ============================================
 // CONFIGURACAO GLOBAL
 // ============================================
 const CONFIG = {
   ownerNumber: '559299652961',
+  ownerNumbers: ['559299652961', '559299652961'], // com e sem o 9 extra
   ownerJid: '559299652961@s.whatsapp.net',
   botName: 'DEMI BOT',
   prefix: ['#', '/', '!', '.'],
@@ -121,6 +137,7 @@ const isUrl = str => /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-
 const formatPhone = jid => jid?.replace(/@.+/, '') || ''
 const formatJid = number => `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`
 const isGroup = jid => jid?.endsWith('@g.us')
+const isOwnerNumber = (number) => CONFIG.ownerNumbers.includes(number)
 const formatDate = d => new Date(d).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 
 function parseTime(timeStr) {
@@ -775,13 +792,16 @@ async function startBot() {
   // ============================================
   // HANDLER DE MENSAGENS
   // ============================================
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  sock.ev.on('messages.upsert', async (upsert) => {
+    const msgs = upsert.messages || upsert
+    const type = upsert.type || 'notify'
     if (type !== 'notify') return
-    for (const msg of messages) {
+    for (const msg of msgs) {
       try {
+        console.log('[DEMI BOT] Mensagem recebida de:', msg.key?.remoteJid, '| fromMe:', msg.key?.fromMe, '| type:', Object.keys(msg.message || {}))
         await handleMessage(msg)
       } catch (err) {
-        console.error('[DEMI BOT] Erro ao processar mensagem:', err.message)
+        console.error('[DEMI BOT] Erro ao processar mensagem:', err.message, err.stack)
       }
     }
   })
@@ -977,35 +997,35 @@ async function handleGroupEvent(event) {
 async function handleMessage(msg) {
   if (!msg.message) return
   if (msg.key.fromMe) return
+  // Ignorar mensagens de status/broadcast
+  if (msg.key.remoteJid === 'status@broadcast') return
 
   const chatId = msg.key.remoteJid
   const isGrp = isGroup(chatId)
   const senderId = msg.key.participant || msg.key.remoteJid
   const senderNumber = formatPhone(senderId)
 
+  console.log(`[DEMI BOT] handleMessage | chat: ${chatId} | sender: ${senderNumber} | isGroup: ${isGrp} | isOwner: ${isOwnerNumber(senderNumber)}`)
+
+  // Dono tem acesso total em qualquer lugar (grupo ou privado)
+  const isOwnerMsg = isOwnerNumber(senderNumber)
+
   // Bot so funciona em grupos (exceto dono)
-  if (!isGrp && senderNumber !== CONFIG.ownerNumber) {
-    return // Ignorar mensagens privadas
+  if (!isGrp && !isOwnerMsg) {
+    console.log(`[DEMI BOT] Ignorando msg privada de: ${senderNumber}`)
+    return
   }
 
   // Verificar aluguel do grupo
-  if (isGrp) {
+  if (isGrp && !isOwnerMsg) {
     const rental = checkRental(chatId)
-    if (!rental.active && senderNumber !== CONFIG.ownerNumber) {
-      // Permitir apenas o comando de ativacao pelo dono
+    if (!rental.active) {
       const bodyText = extractBody(msg)
       if (!bodyText) return
       const prefixUsed = CONFIG.prefix.find(p => bodyText.startsWith(p))
-      if (prefixUsed) {
-        const cmd = bodyText.slice(prefixUsed.length).trim().split(/\s+/)[0].toLowerCase()
-        if (cmd === 'ativarbot' && senderNumber === CONFIG.ownerNumber) {
-          // Permitir este comando mesmo sem rental
-        } else {
-          return // Bot inativo neste grupo
-        }
-      } else {
-        return
-      }
+      if (!prefixUsed) return
+      const cmd = bodyText.slice(prefixUsed.length).trim().split(/\s+/)[0].toLowerCase()
+      if (cmd !== 'ativarbot') return // Apenas ativarbot funciona sem rental
     }
   }
 
@@ -1060,7 +1080,7 @@ async function handleMessage(msg) {
     }
   }
 
-  const isOwner = senderNumber === CONFIG.ownerNumber
+  const isOwner = isOwnerNumber(senderNumber)
 
   // ============================================
   // ANTI-SISTEMAS (verificar antes dos comandos)
@@ -1165,11 +1185,15 @@ async function handleMessage(msg) {
 
   // Helper para responder
   const reply = async (txt) => {
-    await sock.sendMessage(chatId, { text: txt, quoted: msg }, { quoted: msg }).catch(() => {})
+    await sock.sendMessage(chatId, { text: txt }, { quoted: msg }).catch((e) => {
+      console.error('[DEMI BOT] Erro ao responder:', e.message)
+    })
   }
 
   const replyMention = async (txt, mentions = []) => {
-    await sock.sendMessage(chatId, { text: txt, mentions }, { quoted: msg }).catch(() => {})
+    await sock.sendMessage(chatId, { text: txt, mentions }, { quoted: msg }).catch((e) => {
+      console.error('[DEMI BOT] Erro ao responder com mention:', e.message)
+    })
   }
 
   // ============================================
@@ -2690,12 +2714,16 @@ async function downloadMediaMessage(msg) {
 
     if (!mediaMsg) return null
 
-    const stream = await (await import('@whiskeysockets/baileys')).downloadMediaMessage(
-      { key: msg.key, message: msg.message },
-      'buffer',
-      {}
-    )
-    return stream
+    const downloadFn = baileys.downloadMediaMessage || baileys.downloadContentFromMessage
+    if (downloadFn) {
+      const stream = await downloadFn(
+        { key: msg.key, message: msg.message },
+        'buffer',
+        {}
+      )
+      return stream
+    }
+    return null
   } catch (e) {
     console.error('[DEMI BOT] Erro ao baixar midia:', e.message)
     return null
