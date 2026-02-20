@@ -7,7 +7,12 @@
  * ============================================
  */
 
-import makeWASocket, {
+import { createRequire } from 'module'
+const require = createRequire(import.meta.url)
+
+const baileys = require('@whiskeysockets/baileys')
+const makeWASocket = baileys.default || baileys
+const {
   useMultiFileAuthState,
   DisconnectReason,
   makeInMemoryStore,
@@ -16,21 +21,23 @@ import makeWASocket, {
   jidNormalizedUser,
   generateForwardMessageContent,
   generateWAMessageFromContent,
-  proto,
   delay
-} from '@whiskeysockets/baileys'
-import pino from 'pino'
+} = baileys
+
+const pino = require('pino')
+const { Boom } = require('@hapi/boom')
+const axios = require('axios')
+
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { Boom } from '@hapi/boom'
-import axios from 'axios'
 import crypto from 'crypto'
-import express from 'express'
-import cors from 'cors'
-import sharp from 'sharp'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+
+const express = require('express')
+const cors = require('cors')
+const sharp = require('sharp')
 
 const execAsync = promisify(exec)
 const __filename = fileURLToPath(import.meta.url)
