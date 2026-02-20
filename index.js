@@ -1016,19 +1016,22 @@ async function handleMessage(msg) {
     return
   }
 
-  // Verificar aluguel do grupo
+    // Verificar aluguel do grupo
   if (isGrp && !isOwnerMsg) {
     const rental = checkRental(chatId)
+    console.log(`[DEMI BOT] Rental check | grupo: ${chatId} | active: ${rental.active} | reason: ${rental.reason || 'ok'}`)
     if (!rental.active) {
       const bodyText = extractBody(msg)
       if (!bodyText) return
       const prefixUsed = CONFIG.prefix.find(p => bodyText.startsWith(p))
       if (!prefixUsed) return
       const cmd = bodyText.slice(prefixUsed.length).trim().split(/\s+/)[0].toLowerCase()
-      if (cmd !== 'ativarbot') return // Apenas ativarbot funciona sem rental
+      if (cmd !== 'ativarbot') {
+        console.log(`[DEMI BOT] Comando "${cmd}" bloqueado - grupo sem aluguel ativo: ${chatId}`)
+        return
+      }
     }
   }
-
   // Extrair texto da mensagem
   const body = extractBody(msg)
   if (!body && !msg.message.stickerMessage && !msg.message.imageMessage && !msg.message.videoMessage) return
