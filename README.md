@@ -21,14 +21,91 @@ pnpm install
 # 3. Buildar o painel (Next.js)
 pnpm build
 
-# 4. Iniciar o painel (porta 3000)
-pnpm start &
+# 4. Instalar PM2 globalmente (caso nao tenha)
+npm install -g pm2
+```
 
-# 5. Iniciar o bot (porta API 5001)
+### Primeira vez (conectar o QR Code)
+
+Na primeira vez voce precisa rodar o bot manualmente para escanear o QR Code:
+
+```bash
+# Roda o bot no terminal para ver o QR Code
 pnpm bot
 ```
 
-Ao iniciar o bot pela primeira vez, um QR Code sera exibido no terminal. Escaneie com o WhatsApp para conectar.
+Escaneie o QR Code com o WhatsApp. Depois que conectar e aparecer `[DEMI BOT] Conectado com sucesso!`, pare com `Ctrl+C`.
+
+### Rodando tudo com PM2 (forma definitiva)
+
+Depois de conectar o QR Code, use PM2 para rodar o bot e o painel juntos:
+
+```bash
+# Inicia bot + painel juntos
+pm2 start ecosystem.config.cjs
+
+# Ver status dos processos
+pm2 status
+
+# Ver logs em tempo real
+pm2 logs
+
+# Ver logs so do bot
+pm2 logs demi-bot
+
+# Ver logs so do painel
+pm2 logs demi-painel
+
+# Parar tudo
+pm2 stop all
+
+# Reiniciar tudo
+pm2 restart all
+
+# Fazer PM2 iniciar automaticamente quando a VPS reiniciar
+pm2 startup
+pm2 save
+```
+
+### Comandos uteis do PM2
+
+```bash
+# Reiniciar apenas o bot (quando atualizar o codigo)
+pm2 restart demi-bot
+
+# Reiniciar apenas o painel
+pm2 restart demi-painel
+
+# Monitorar CPU/RAM em tempo real
+pm2 monit
+
+# Deletar tudo e comecar do zero
+pm2 delete all
+pm2 start ecosystem.config.cjs
+```
+
+### Atualizando o codigo
+
+```bash
+git pull
+pnpm install
+pnpm build
+pm2 restart all
+```
+
+### Sessao corrompida (Bad MAC errors repetidos)
+
+Se o bot nao conseguir conectar ou ficar com erros de criptografia:
+
+```bash
+pm2 stop demi-bot
+rm -rf session/
+pm2 start demi-bot
+# OU rode manualmente para ver o QR:
+pm2 stop demi-bot
+pnpm bot
+# Escaneie o QR, depois Ctrl+C e pm2 start demi-bot
+```
 
 ## Acessos
 
