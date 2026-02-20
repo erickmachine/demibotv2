@@ -47,8 +47,8 @@ const __dirname = path.dirname(__filename)
 // CONFIGURACAO GLOBAL
 // ============================================
 const CONFIG = {
-  ownerNumber: '5592999652961',
-  ownerJid: '5592999652961@s.whatsapp.net',
+  ownerNumber: '559299652961',
+  ownerJid: '559299652961@s.whatsapp.net',
   botName: 'DEMI BOT',
   prefix: ['#', '/', '!', '.'],
   apiPort: 5001,
@@ -2853,7 +2853,7 @@ app.listen(CONFIG.apiPort, '0.0.0.0', () => {
 // ============================================
 console.log('============================================')
 console.log('  DEMI BOT - WhatsApp Group Bot')
-console.log('  Dono: +5592999652961')
+console.log('  Dono: +559299652961')
 console.log('  Painel: http://129.121.38.161:3000')
 console.log('  API: http://129.121.38.161:5001')
 console.log('============================================')
