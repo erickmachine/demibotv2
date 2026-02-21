@@ -1,7 +1,7 @@
 /**
  * ============================================
  *  DEMI BOT - WhatsApp Group Bot Completo
- *  Dono: +5592999652961
+ *  Dono: +559299652961
  *  Framework: @whiskeysockets/baileys
  *  Painel: Next.js em http://129.121.38.161:3000
  * ============================================
@@ -44,7 +44,6 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 // Silenciar erros de decrypt do Baileys (Bad MAC / session errors)
-// Esses erros sao normais quando a sessao esta sendo re-estabelecida
 const _origConsoleError = console.error
 console.error = (...args) => {
   const msg = args[0]?.toString?.() || ''
@@ -63,7 +62,7 @@ console.error = (...args) => {
 // ============================================
 const CONFIG = {
   ownerNumber: '559299652961',
-  ownerNumbers: ['559299652961', '559299652961'], // com e sem o 9 extra
+  ownerNumbers: ['559299652961', '559299652961'],
   ownerJid: '559299652961@s.whatsapp.net',
   botName: 'DEMI BOT',
   prefix: ['#', '/', '!', '.'],
@@ -137,7 +136,10 @@ const isUrl = str => /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-
 const formatPhone = jid => jid?.replace(/@.+/, '') || ''
 const formatJid = number => `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`
 const isGroup = jid => jid?.endsWith('@g.us')
-const isOwnerNumber = (number) => CONFIG.ownerNumbers.includes(number)
+const isOwnerNumber = (number) => {
+  const clean = number.replace(/[^0-9]/g, '')
+  return CONFIG.ownerNumbers.some(n => clean === n || clean.endsWith(n) || n.endsWith(clean))
+}
 const formatDate = d => new Date(d).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 
 function parseTime(timeStr) {
@@ -220,7 +222,7 @@ const ROLES = {
 
 function getUserRole(groupId, userId) {
   const roles = db.roles.get(groupId, {})
-  if (formatPhone(userId) === CONFIG.ownerNumber) return ROLES.OWNER
+  if (isOwnerNumber(formatPhone(userId))) return ROLES.OWNER
   return roles[userId] || ROLES.MEMBER
 }
 
@@ -312,8 +314,6 @@ function trackActivity(groupId, userId) {
   act.messages++
   act.lastSeen = Date.now()
   db.activity.set(key, act)
-
-  // Gold por atividade (1 gold a cada 5 mensagens)
   if (act.messages % 5 === 0) addGold(groupId, userId, 1)
 }
 
@@ -747,7 +747,7 @@ async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(CONFIG.sessionPath)
   const { version } = await fetchLatestBaileysVersion()
 
-   sock = makeWASocket({
+  sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: true,
@@ -788,7 +788,6 @@ async function startBot() {
       console.log('[DEMI BOT] Conectado com sucesso!')
       botStartTime = Date.now()
       incrementStat('connections')
-      // Notificar dono
       await sock.sendMessage(CONFIG.ownerJid, {
         text: `*${CONFIG.botName} conectado com sucesso!*\n\nData: ${formatDate(Date.now())}\nGrupos ativos: ${Object.keys(db.rental.getAll()).length}`
       }).catch(() => {})
@@ -806,7 +805,6 @@ async function startBot() {
     if (type !== 'notify') return
     for (const msg of msgs) {
       try {
-        console.log('[DEMI BOT] Mensagem recebida de:', msg.key?.remoteJid, '| fromMe:', msg.key?.fromMe, '| type:', Object.keys(msg.message || {}))
         await handleMessage(msg)
       } catch (err) {
         console.error('[DEMI BOT] Erro ao processar mensagem:', err.message, err.stack)
@@ -825,19 +823,15 @@ async function startBot() {
     }
   })
 
-  // ============================================
-  // VERIFICACAO PERIODICA DE ALUGUEL
-  // ============================================
+  // Verificacao periodica de aluguel
   setInterval(async () => {
     await checkAllRentals()
-  }, 60 * 1000) // Verifica a cada 1 minuto
+  }, 60 * 1000)
 
-  // ============================================
-  // MENSAGENS AGENDADAS
-  // ============================================
+  // Mensagens agendadas
   setInterval(async () => {
     await processScheduledMessages()
-  }, 30 * 1000) // Verifica a cada 30 segundos
+  }, 30 * 1000)
 }
 
 // ============================================
@@ -855,7 +849,6 @@ async function checkAllRentals() {
     const threeDay = 3 * oneDay
     const oneHour = 60 * 60 * 1000
 
-    // Notificar 3 dias antes
     if (remaining <= threeDay && remaining > oneDay && !rental.notified3d) {
       rental.notified3d = true
       db.rental.set(groupId, rental)
@@ -864,7 +857,6 @@ async function checkAllRentals() {
       }).catch(() => {})
     }
 
-    // Notificar 1 dia antes
     if (remaining <= oneDay && remaining > oneHour && !rental.notified1d) {
       rental.notified1d = true
       db.rental.set(groupId, rental)
@@ -873,7 +865,6 @@ async function checkAllRentals() {
       }).catch(() => {})
     }
 
-    // Notificar 1 hora antes
     if (remaining <= oneHour && remaining > 0 && !rental.notified1h) {
       rental.notified1h = true
       db.rental.set(groupId, rental)
@@ -882,7 +873,6 @@ async function checkAllRentals() {
       }).catch(() => {})
     }
 
-    // Expirou
     if (remaining <= 0) {
       rental.active = false
       db.rental.set(groupId, rental)
@@ -935,14 +925,14 @@ async function handleGroupEvent(event) {
   const config = getGroupConfig(groupId)
   const rental = checkRental(groupId)
 
-  if (!rental.active && formatPhone(CONFIG.ownerJid) !== CONFIG.ownerNumber) return
+  // Permitir eventos se o aluguel esta ativo
+  if (!rental.active) return
 
   const metadata = await sock.groupMetadata(groupId).catch(() => null)
   if (!metadata) return
 
   for (const participant of participants) {
     if (action === 'add') {
-      // Checar lista negra
       if (isBlacklisted(participant)) {
         await sock.groupParticipantsUpdate(groupId, [participant], 'remove').catch(() => {})
         await sock.sendMessage(groupId, {
@@ -952,7 +942,6 @@ async function handleGroupEvent(event) {
         continue
       }
 
-      // Checar anti-fake (numeros que nao comecam com 55)
       if (config.antifake && !participant.startsWith('55')) {
         await sock.groupParticipantsUpdate(groupId, [participant], 'remove').catch(() => {})
         await sock.sendMessage(groupId, {
@@ -962,7 +951,6 @@ async function handleGroupEvent(event) {
         continue
       }
 
-      // Mensagem de boas-vindas
       if (config.welcome) {
         const welcomeText = config.welcomeMsg ||
           `Seja bem-vindo(a) ao grupo *${metadata.subject}*!\n\n@${formatPhone(participant)}\n\nLeia as regras e use *#menu* para ver os comandos disponiveis.`
@@ -986,7 +974,6 @@ async function handleGroupEvent(event) {
     }
 
     if (action === 'remove') {
-      // Mensagem de saida
       if (config.goodbye) {
         const goodbyeText = config.goodbyeMsg ||
           `@${formatPhone(participant)} saiu do grupo *${metadata.subject}*. Ate mais!`
@@ -1000,12 +987,65 @@ async function handleGroupEvent(event) {
 }
 
 // ============================================
+// FUNCAO PARA EXTRAIR CORPO DA MENSAGEM
+// ============================================
+function extractBody(msg) {
+  const type = getContentType(msg.message)
+  if (!type) return ''
+  if (type === 'conversation') return msg.message.conversation
+  if (type === 'extendedTextMessage') return msg.message.extendedTextMessage?.text
+  if (type === 'imageMessage') return msg.message.imageMessage?.caption
+  if (type === 'videoMessage') return msg.message.videoMessage?.caption
+  if (type === 'documentMessage') return msg.message.documentMessage?.caption
+  return ''
+}
+
+// ============================================
+// FUNCAO PARA DOWNLOAD DE MIDIA
+// ============================================
+async function downloadMediaMessage(msg) {
+  try {
+    const type = getContentType(msg.message)
+    const quotedMsg2 = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
+    let mediaMsg = null
+
+    if (type === 'imageMessage') mediaMsg = msg.message.imageMessage
+    else if (type === 'videoMessage') mediaMsg = msg.message.videoMessage
+    else if (type === 'stickerMessage') mediaMsg = msg.message.stickerMessage
+    else if (type === 'audioMessage') mediaMsg = msg.message.audioMessage
+    else if (type === 'documentMessage') mediaMsg = msg.message.documentMessage
+    else if (quotedMsg2) {
+      const qType = getContentType(quotedMsg2)
+      if (qType === 'imageMessage') mediaMsg = quotedMsg2.imageMessage
+      else if (qType === 'videoMessage') mediaMsg = quotedMsg2.videoMessage
+      else if (qType === 'stickerMessage') mediaMsg = quotedMsg2.stickerMessage
+      else if (qType === 'audioMessage') mediaMsg = quotedMsg2.audioMessage
+    }
+
+    if (!mediaMsg) return null
+
+    const downloadFn = baileys.downloadMediaMessage || baileys.downloadContentFromMessage
+    if (downloadFn) {
+      const stream = await downloadFn(
+        { key: msg.key, message: msg.message },
+        'buffer',
+        {}
+      )
+      return stream
+    }
+    return null
+  } catch (e) {
+    console.error('[DEMI BOT] Erro ao baixar midia:', e.message)
+    return null
+  }
+}
+
+// ============================================
 // HANDLER PRINCIPAL DE MENSAGENS
 // ============================================
 async function handleMessage(msg) {
   if (!msg.message) return
   if (msg.key.fromMe) return
-  // Ignorar mensagens de status/broadcast
   if (msg.key.remoteJid === 'status@broadcast') return
 
   const chatId = msg.key.remoteJid
@@ -1013,33 +1053,42 @@ async function handleMessage(msg) {
   const senderId = msg.key.participant || msg.key.remoteJid
   const senderNumber = formatPhone(senderId)
 
-  console.log(`[DEMI BOT] handleMessage | chat: ${chatId} | sender: ${senderNumber} | isGroup: ${isGrp} | isOwner: ${isOwnerNumber(senderNumber)}`)
+  // ==========================================
+  // FIX PRINCIPAL: Extrair mentionedJid, quotedParticipant, quotedMsg
+  // Essas variaveis sao usadas em quase todos os comandos
+  // ==========================================
+  const contextInfo = msg.message?.extendedTextMessage?.contextInfo ||
+                      msg.message?.imageMessage?.contextInfo ||
+                      msg.message?.videoMessage?.contextInfo ||
+                      msg.message?.stickerMessage?.contextInfo ||
+                      msg.message?.documentMessage?.contextInfo ||
+                      {}
+
+  const mentionedJid = contextInfo.mentionedJid || []
+  const quotedParticipant = contextInfo.participant || null
+  const quotedMsg = contextInfo.quotedMessage || null
+
+  console.log(`[DEMI BOT] handleMessage | chat: ${chatId} | sender: ${senderNumber} | isGroup: ${isGrp} | isOwner: ${isOwnerNumber(senderNumber)} | mentions: ${mentionedJid.length}`)
 
   // Dono tem acesso total em qualquer lugar (grupo ou privado)
   const isOwnerMsg = isOwnerNumber(senderNumber)
 
   // Bot so funciona em grupos (exceto dono)
-  if (!isGrp && !isOwnerMsg) {
-    console.log(`[DEMI BOT] Ignorando msg privada de: ${senderNumber}`)
-    return
-  }
+  if (!isGrp && !isOwnerMsg) return
 
-    // Verificar aluguel do grupo
+  // Verificar aluguel do grupo (dono sempre tem acesso)
   if (isGrp && !isOwnerMsg) {
     const rental = checkRental(chatId)
-    console.log(`[DEMI BOT] Rental check | grupo: ${chatId} | active: ${rental.active} | reason: ${rental.reason || 'ok'}`)
     if (!rental.active) {
       const bodyText = extractBody(msg)
       if (!bodyText) return
       const prefixUsed = CONFIG.prefix.find(p => bodyText.startsWith(p))
       if (!prefixUsed) return
       const cmd = bodyText.slice(prefixUsed.length).trim().split(/\s+/)[0].toLowerCase()
-      if (cmd !== 'ativarbot') {
-        console.log(`[DEMI BOT] Comando "${cmd}" bloqueado - grupo sem aluguel ativo: ${chatId}`)
-        return
-      }
+      if (cmd !== 'ativarbot') return
     }
   }
+
   // Extrair texto da mensagem
   const body = extractBody(msg)
   if (!body && !msg.message.stickerMessage && !msg.message.imageMessage && !msg.message.videoMessage) return
@@ -1047,7 +1096,6 @@ async function handleMessage(msg) {
   // Tracking de atividade
   if (isGrp) trackActivity(chatId, senderId)
 
-  // Incrementar stats
   incrementStat('messagesProcessed')
 
   // Verificar AFK
@@ -1061,8 +1109,8 @@ async function handleMessage(msg) {
   }
 
   // Verificar mencao de AFK
-  if (msg.message.extendedTextMessage?.contextInfo?.mentionedJid) {
-    for (const mentioned of msg.message.extendedTextMessage.contextInfo.mentionedJid) {
+  if (mentionedJid.length > 0) {
+    for (const mentioned of mentionedJid) {
       const afk = db.afk.get(mentioned)
       if (afk) {
         await sock.sendMessage(chatId, {
@@ -1189,13 +1237,12 @@ async function handleMessage(msg) {
 
   incrementStat('commandsProcessed')
 
-   // Helper para responder (com retry para erro "No sessions")
+  // Helper para responder (com retry para erro "No sessions")
   const reply = async (txt) => {
     try {
       await sock.sendMessage(chatId, { text: txt }, { quoted: msg })
     } catch (e) {
       if (e.message === 'No sessions' || e.message?.includes('session')) {
-        console.log('[DEMI BOT] Sessao nao encontrada, tentando reenviar para:', chatId)
         try {
           await delay(1500)
           await sock.sendMessage(chatId, { text: txt })
@@ -1213,7 +1260,6 @@ async function handleMessage(msg) {
       await sock.sendMessage(chatId, { text: txt, mentions }, { quoted: msg })
     } catch (e) {
       if (e.message === 'No sessions' || e.message?.includes('session')) {
-        console.log('[DEMI BOT] Sessao nao encontrada (mention), tentando reenviar para:', chatId)
         try {
           await delay(1500)
           await sock.sendMessage(chatId, { text: txt, mentions })
@@ -1284,6 +1330,7 @@ async function handleMessage(msg) {
       // ==================== DONO DO BOT ====================
       case 'ativarbot': {
         if (!isOwner) return reply('Apenas o dono do bot pode usar este comando.')
+        if (!isGrp) return reply('Use este comando em um grupo.')
         if (!text) return reply(`Use: ${prefixUsed}ativarbot <tempo>\nExemplo: ${prefixUsed}ativarbot 30d (30 dias)\n${prefixUsed}ativarbot 24h (24 horas)\n${prefixUsed}ativarbot 30min (30 minutos)`)
         const expireAt = activateRental(chatId, text, senderNumber)
         if (!expireAt) return reply('Formato invalido! Use: 30min, 24h, 30d, etc.')
@@ -1304,9 +1351,9 @@ async function handleMessage(msg) {
 
       case 'verificar_aluguel': case 'aluguel': {
         if (!isOwner && !isAdmin) return reply('Sem permissao.')
-        const info = getRentalInfo(chatId)
-        if (!info) return reply('Nenhum plano ativo neste grupo.')
-        await reply(`*Status do Aluguel*\n\nAtivado em: ${formatDate(info.activatedAt)}\nExpira em: ${formatDate(info.expireAt)}\nDuracao: ${info.duration}\nTempo restante: ${info.remaining}\nStatus: ${info.isExpired ? 'EXPIRADO' : 'ATIVO'}`)
+        const rentalInfo = getRentalInfo(chatId)
+        if (!rentalInfo) return reply('Nenhum plano ativo neste grupo.')
+        await reply(`*Status do Aluguel*\n\nAtivado em: ${formatDate(rentalInfo.activatedAt)}\nExpira em: ${formatDate(rentalInfo.expireAt)}\nDuracao: ${rentalInfo.duration}\nTempo restante: ${rentalInfo.remaining}\nStatus: ${rentalInfo.isExpired ? 'EXPIRADO' : 'ATIVO'}`)
         break
       }
 
@@ -1347,8 +1394,8 @@ async function handleMessage(msg) {
         const list = Object.values(groups)
         let txt = `*Grupos (${list.length}):*\n\n`
         list.forEach((g, i) => {
-          const rental = getRentalInfo(g.id)
-          txt += `${i + 1}. ${g.subject}\n   Membros: ${g.participants?.length || 0}\n   Status: ${rental?.isExpired === false ? 'ATIVO' : 'INATIVO'}\n\n`
+          const rentalG = getRentalInfo(g.id)
+          txt += `${i + 1}. ${g.subject}\n   Membros: ${g.participants?.length || 0}\n   Status: ${rentalG?.isExpired === false ? 'ATIVO' : 'INATIVO'}\n\n`
         })
         await reply(txt)
         break
@@ -1361,7 +1408,7 @@ async function handleMessage(msg) {
         if (!isBotAdmin) return reply('O bot precisa ser admin.')
         const target = mentionedJid[0] || quotedParticipant
         if (!target) return reply(`Use: ${prefixUsed}ban @usuario`)
-        if (formatPhone(target) === CONFIG.ownerNumber) return reply('Nao posso banir o dono do bot.')
+        if (isOwnerNumber(formatPhone(target))) return reply('Nao posso banir o dono do bot.')
         await sock.groupParticipantsUpdate(chatId, [target], 'remove')
         await replyMention(`@${formatPhone(target)} foi removido do grupo.`, [target])
         break
@@ -1429,7 +1476,6 @@ async function handleMessage(msg) {
           clearWarnings(chatId, target5)
           await replyMention(`Advertencias de @${formatPhone(target5)} foram limpas.`, [target5])
         } else {
-          // Limpar todas
           const allKeys = Object.keys(db.warnings.getAll())
           allKeys.filter(k => k.startsWith(chatId)).forEach(k => db.warnings.delete(k))
           await reply('Todas as advertencias do grupo foram limpas.')
@@ -1443,15 +1489,15 @@ async function handleMessage(msg) {
         const groupWarns = Object.entries(allWarns).filter(([k]) => k.startsWith(chatId))
         if (groupWarns.length === 0) return reply('Nenhum membro advertido.')
         let warnListText = '*Membros advertidos:*\n\n'
-        const mentions = []
-        groupWarns.forEach(([key, warns]) => {
-          if (warns.length > 0) {
+        const warnMentions = []
+        groupWarns.forEach(([key, warnsList]) => {
+          if (warnsList.length > 0) {
             const userId = key.replace(chatId + '_', '')
-            mentions.push(userId)
-            warnListText += `@${formatPhone(userId)} - ${warns.length} advertencia(s)\n`
+            warnMentions.push(userId)
+            warnListText += `@${formatPhone(userId)} - ${warnsList.length} advertencia(s)\n`
           }
         })
-        await replyMention(warnListText, mentions)
+        await replyMention(warnListText, warnMentions)
         break
       }
 
@@ -1483,7 +1529,6 @@ async function handleMessage(msg) {
         if (!isBotAdmin) return reply('O bot precisa ser admin.')
         const target8 = mentionedJid[0] || quotedParticipant
         if (!target8) return reply(`Use: ${prefixUsed}mute @usuario`)
-        // Implementar via warning + tracking
         const mutedList = db.groups.get(`muted_${chatId}`, [])
         if (!mutedList.includes(target8)) mutedList.push(target8)
         db.groups.set(`muted_${chatId}`, mutedList)
@@ -1580,8 +1625,8 @@ async function handleMessage(msg) {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!groupMetadata) return reply('Erro ao obter dados do grupo.')
         const g = groupMetadata
-        const rental = getRentalInfo(chatId)
-        await reply(`*Informacoes do Grupo*\n\nNome: ${g.subject}\nID: ${g.id}\nDescricao: ${g.desc || 'Nenhuma'}\nMembros: ${g.participants.length}\nAdmins: ${g.participants.filter(p => p.admin).length}\nCriado em: ${formatDate(g.creation * 1000)}\n\n*Bot:*\nPlano: ${rental ? rental.duration : 'Sem plano'}\nStatus: ${rental && !rental.isExpired ? 'ATIVO' : 'INATIVO'}\nRestante: ${rental ? rental.remaining : '-'}`)
+        const rentalGI = getRentalInfo(chatId)
+        await reply(`*Informacoes do Grupo*\n\nNome: ${g.subject}\nID: ${g.id}\nDescricao: ${g.desc || 'Nenhuma'}\nMembros: ${g.participants.length}\nAdmins: ${g.participants.filter(p => p.admin).length}\nCriado em: ${formatDate(g.creation * 1000)}\n\n*Bot:*\nPlano: ${rentalGI ? rentalGI.duration : 'Sem plano'}\nStatus: ${rentalGI && !rentalGI.isExpired ? 'ATIVO' : 'INATIVO'}\nRestante: ${rentalGI ? rentalGI.remaining : '-'}`)
         break
       }
 
@@ -1635,81 +1680,81 @@ async function handleMessage(msg) {
       case 'antifake': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.antifake
-        setGroupConfig(chatId, 'antifake', newState)
-        await reply(`Anti-fake ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateAF = !config.antifake
+        setGroupConfig(chatId, 'antifake', newStateAF)
+        await reply(`Anti-fake ${newStateAF ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'antipalavra': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.antipalavra
-        setGroupConfig(chatId, 'antipalavra', newState)
-        await reply(`Anti-palavrao ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateAP = !config.antipalavra
+        setGroupConfig(chatId, 'antipalavra', newStateAP)
+        await reply(`Anti-palavrao ${newStateAP ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'antiflood': case 'advflood': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.antiflood
-        setGroupConfig(chatId, 'antiflood', newState)
-        await reply(`Anti-flood ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateAFL = !config.antiflood
+        setGroupConfig(chatId, 'antiflood', newStateAFL)
+        await reply(`Anti-flood ${newStateAFL ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'soadm': case 'so_adm': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.soadm
-        setGroupConfig(chatId, 'soadm', newState)
-        await reply(`Modo so admins ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateSA = !config.soadm
+        setGroupConfig(chatId, 'soadm', newStateSA)
+        await reply(`Modo so admins ${newStateSA ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'autosticker': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.autosticker
-        setGroupConfig(chatId, 'autosticker', newState)
-        await reply(`Auto-sticker ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateAS = !config.autosticker
+        setGroupConfig(chatId, 'autosticker', newStateAS)
+        await reply(`Auto-sticker ${newStateAS ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'autodl': case 'autobaixar': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.autodl
-        setGroupConfig(chatId, 'autodl', newState)
-        await reply(`Auto-download ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateAD = !config.autodl
+        setGroupConfig(chatId, 'autodl', newStateAD)
+        await reply(`Auto-download ${newStateAD ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'x9viewonce': case 'x9visuunica': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.x9viewonce
-        setGroupConfig(chatId, 'x9viewonce', newState)
-        await reply(`X9 visualizacao unica ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateX9 = !config.x9viewonce
+        setGroupConfig(chatId, 'x9viewonce', newStateX9)
+        await reply(`X9 visualizacao unica ${newStateX9 ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'bemvindo': case 'welcome': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.welcome
-        setGroupConfig(chatId, 'welcome', newState)
-        await reply(`Boas-vindas ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateBV = !config.welcome
+        setGroupConfig(chatId, 'welcome', newStateBV)
+        await reply(`Boas-vindas ${newStateBV ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
       case 'multiprefix': case 'multiprefixo': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const newState = !config.multiprefix
-        setGroupConfig(chatId, 'multiprefix', newState)
-        await reply(`Multi-prefixo ${newState ? 'ATIVADO' : 'DESATIVADO'}`)
+        const newStateMP = !config.multiprefix
+        setGroupConfig(chatId, 'multiprefix', newStateMP)
+        await reply(`Multi-prefixo ${newStateMP ? 'ATIVADO' : 'DESATIVADO'}`)
         break
       }
 
@@ -1753,7 +1798,6 @@ async function handleMessage(msg) {
       case 'listanegra': {
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin && !isOwner) return reply('Sem permissao.')
         if (!text) {
-          // Listar
           const bl = db.blacklist.getAll()
           const entries = Object.entries(bl)
           if (entries.length === 0) return reply('Lista negra vazia.')
@@ -1773,9 +1817,9 @@ async function handleMessage(msg) {
       case 'tirardalista': case 'rmlistanegra': {
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin && !isOwner) return reply('Sem permissao.')
         if (!text) return reply(`Use: ${prefixUsed}tirardalista numero`)
-        const num = text.replace(/[^0-9]/g, '')
-        removeFromBlacklist(num)
-        await reply(`${num} removido da lista negra.`)
+        const numBL = text.replace(/[^0-9]/g, '')
+        removeFromBlacklist(numBL)
+        await reply(`${numBL} removido da lista negra.`)
         break
       }
 
@@ -1846,11 +1890,11 @@ async function handleMessage(msg) {
       case 'cargos': {
         if (!isGrp) return reply('Apenas em grupos.')
         const roles = db.roles.get(chatId, {})
-        const entries = Object.entries(roles)
-        if (entries.length === 0) return reply('Nenhum cargo atribuido neste grupo.')
+        const roleEntries = Object.entries(roles)
+        if (roleEntries.length === 0) return reply('Nenhum cargo atribuido neste grupo.')
         let rolesText = '*Cargos do grupo:*\n\n'
         const roleMentions = []
-        entries.forEach(([userId, role]) => {
+        roleEntries.forEach(([userId, role]) => {
           roleMentions.push(userId)
           rolesText += `@${formatPhone(userId)} - ${role}\n`
         })
@@ -1862,10 +1906,9 @@ async function handleMessage(msg) {
       case 'mensagem-automatica': case 'mensagem_automatica': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        // Formato: HH:MM texto
-        const match = text.match(/^(\d{1,2}):(\d{2})\s+(.+)$/s)
-        if (!match) return reply(`Use: ${prefixUsed}mensagem-automatica HH:MM texto da mensagem`)
-        const [, h, m, msgText] = match
+        const matchTime = text.match(/^(\d{1,2}):(\d{2})\s+(.+)$/s)
+        if (!matchTime) return reply(`Use: ${prefixUsed}mensagem-automatica HH:MM texto da mensagem`)
+        const [, h, m, msgText] = matchTime
         addScheduledMessage(chatId, {
           text: msgText,
           hour: parseInt(h),
@@ -1921,9 +1964,9 @@ async function handleMessage(msg) {
       case 'daily': case 'diario': {
         if (!isGrp) return reply('Apenas em grupos.')
         const lastDaily = db.gold.get(`daily_${chatId}_${senderId}`, 0)
-        const oneDay = 24 * 60 * 60 * 1000
-        if (Date.now() - lastDaily < oneDay) {
-          const remaining2 = oneDay - (Date.now() - lastDaily)
+        const oneDayMs = 24 * 60 * 60 * 1000
+        if (Date.now() - lastDaily < oneDayMs) {
+          const remaining2 = oneDayMs - (Date.now() - lastDaily)
           return reply(`Voce ja resgatou hoje! Volte em ${timeRemaining(Date.now() + remaining2)}`)
         }
         const amount = getRandom(50, 200)
@@ -2169,7 +2212,7 @@ async function handleMessage(msg) {
         const phrases = [
           'Eu ja tomei um fora feio', 'Eu ja fingi que nao vi alguem na rua',
           'Eu ja ri em hora errada', 'Eu ja mandei mensagem para pessoa errada',
-          'Eu ja caí em publico', 'Eu ja chorei por causa de filme',
+          'Eu ja cai em publico', 'Eu ja chorei por causa de filme',
           'Eu ja menti sobre minha idade', 'Eu ja stalkeei alguem nas redes',
           'Eu ja dormi no trabalho/escola', 'Eu ja fingi estar doente'
         ]
@@ -2183,9 +2226,8 @@ async function handleMessage(msg) {
         if (!opponent) return reply(`Use: ${prefixUsed}duelo @usuario`)
         const senderPower = getRandom(1, 100)
         const opponentPower = getRandom(1, 100)
-        const winner = senderPower > opponentPower ? senderId : opponent
-        const loser = winner === senderId ? opponent : senderId
-        await replyMention(`*DUELO!*\n\n@${formatPhone(senderId)}: ${senderPower} de poder\n@${formatPhone(opponent)}: ${opponentPower} de poder\n\nVencedor: @${formatPhone(winner)}!`, [senderId, opponent])
+        const duelWinner = senderPower > opponentPower ? senderId : opponent
+        await replyMention(`*DUELO!*\n\n@${formatPhone(senderId)}: ${senderPower} de poder\n@${formatPhone(opponent)}: ${opponentPower} de poder\n\nVencedor: @${formatPhone(duelWinner)}!`, [senderId, opponent])
         break
       }
 
@@ -2237,7 +2279,6 @@ async function handleMessage(msg) {
       case 'toimg': {
         if (!msg.message.stickerMessage && !quotedMsg?.stickerMessage) return reply('Marque uma figurinha!')
         try {
-          const stickerMsg = msg.message.stickerMessage || quotedMsg.stickerMessage
           const media = await downloadMediaMessage(msg)
           if (media) {
             const imgBuffer = await sharp(media).png().toBuffer()
@@ -2252,7 +2293,6 @@ async function handleMessage(msg) {
       case 'ttp': {
         if (!text) return reply(`Use: ${prefixUsed}ttp texto`)
         try {
-          // Gerar figurinha de texto usando canvas via API
           const apiUrl = `https://api.lolhuman.xyz/api/ttp?apikey=free&text=${encodeURIComponent(text)}`
           const response = await axios.get(apiUrl, { responseType: 'arraybuffer' }).catch(() => null)
           if (response?.data) {
@@ -2318,17 +2358,6 @@ async function handleMessage(msg) {
         break
       }
 
-      case 'playvideo': case 'playmp4': case 'ytmp4': {
-        if (!text) return reply(`Use: ${prefixUsed}playvideo nome ou URL`)
-        await reply('Buscando video... Aguarde!')
-        try {
-          await reply('Funcao de download de video ativa. Use uma URL do YouTube.')
-        } catch {
-          await reply('Servico indisponivel.')
-        }
-        break
-      }
-
       case 'ytsearch': case 'ytbuscar': {
         if (!text) return reply(`Use: ${prefixUsed}ytsearch texto`)
         try {
@@ -2359,17 +2388,6 @@ async function handleMessage(msg) {
           } else {
             await reply('Letra nao encontrada.')
           }
-        } catch {
-          await reply('Servico indisponivel.')
-        }
-        break
-      }
-
-      case 'tiktok': case 'tiktok_video': {
-        if (!text) return reply(`Use: ${prefixUsed}tiktok URL`)
-        await reply('Baixando TikTok... Aguarde!')
-        try {
-          await reply('Envie o link do TikTok para baixar o video.')
         } catch {
           await reply('Servico indisponivel.')
         }
@@ -2435,10 +2453,9 @@ async function handleMessage(msg) {
       case 'calculadora': case 'calcular': {
         if (!text) return reply(`Use: ${prefixUsed}calculadora expressao`)
         try {
-          // Safe eval
           const sanitized = text.replace(/[^0-9+\-*/().%\s]/g, '')
-          const result = Function(`"use strict"; return (${sanitized})`)()
-          await reply(`*Calculadora:*\n${text} = ${result}`)
+          const calcResult = Function(`"use strict"; return (${sanitized})`)()
+          await reply(`*Calculadora:*\n${text} = ${calcResult}`)
         } catch {
           await reply('Expressao invalida!')
         }
@@ -2560,7 +2577,7 @@ async function handleMessage(msg) {
         const quotedKey = {
           remoteJid: chatId,
           fromMe: false,
-          id: msg.message.extendedTextMessage.contextInfo.stanzaId,
+          id: contextInfo.stanzaId,
           participant: quotedParticipant
         }
         await sock.sendMessage(chatId, { delete: quotedKey }).catch(() => {})
@@ -2616,9 +2633,9 @@ async function handleMessage(msg) {
       case 'limitexto': case 'limitecaracteres': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const limit = parseInt(text) || 0
-        setGroupConfig(chatId, 'limitexto', limit)
-        await reply(limit > 0 ? `Limite de texto definido: ${limit} caracteres` : 'Limite de texto removido.')
+        const limitVal = parseInt(text) || 0
+        setGroupConfig(chatId, 'limitexto', limitVal)
+        await reply(limitVal > 0 ? `Limite de texto definido: ${limitVal} caracteres` : 'Limite de texto removido.')
         break
       }
 
@@ -2626,9 +2643,9 @@ async function handleMessage(msg) {
       case 'setmaxwarn': case 'setlimitec': {
         if (!isGrp) return reply('Apenas em grupos.')
         if (!hasPermission(chatId, senderId, ROLES.ADMIN) && !isAdmin) return reply('Sem permissao.')
-        const maxW = parseInt(text) || 3
-        setGroupConfig(chatId, 'maxWarnings', maxW)
-        await reply(`Maximo de advertencias definido: ${maxW}`)
+        const maxWarnVal = parseInt(text) || 3
+        setGroupConfig(chatId, 'maxWarnings', maxWarnVal)
+        await reply(`Maximo de advertencias definido: ${maxWarnVal}`)
         break
       }
 
@@ -2636,13 +2653,13 @@ async function handleMessage(msg) {
       case 'rankativosg': {
         if (!isGrp) return reply('Apenas em grupos.')
         const allAct = db.activity.getAll()
-        const global = {}
+        const globalAct = {}
         for (const [key, val] of Object.entries(allAct)) {
           const userId = key.split('_').pop()
-          if (!global[userId]) global[userId] = 0
-          global[userId] += val.messages
+          if (!globalAct[userId]) globalAct[userId] = 0
+          globalAct[userId] += val.messages
         }
-        const sorted = Object.entries(global).sort((a, b) => b[1] - a[1]).slice(0, 15)
+        const sorted = Object.entries(globalAct).sort((a, b) => b[1] - a[1]).slice(0, 15)
         let gText = '*Ranking Global de Ativos:*\n\n'
         sorted.forEach(([user, msgs], i) => { gText += `${i + 1}. ${formatPhone(user)} - ${msgs} msgs\n` })
         await reply(gText)
@@ -2663,8 +2680,8 @@ async function handleMessage(msg) {
             case 'sepia': processed = await sharp(media).tint({ r: 112, g: 66, b: 20 }).toBuffer(); break
             case 'invert': processed = await sharp(media).negate().toBuffer(); break
             case 'circulo': {
-              const metadata = await sharp(media).metadata()
-              const size = Math.min(metadata.width, metadata.height)
+              const imgMeta = await sharp(media).metadata()
+              const size = Math.min(imgMeta.width, imgMeta.height)
               const roundedCorners = Buffer.from(
                 `<svg><circle cx="${size / 2}" cy="${size / 2}" r="${size / 2}"/></svg>`
               )
@@ -2681,82 +2698,14 @@ async function handleMessage(msg) {
         break
       }
 
-      // ==================== BUSCA IMAGEM ====================
-      case 'gimage': case 'crimg': case 'pesquisa': {
-        if (!text) return reply(`Use: ${prefixUsed}gimage texto`)
-        await reply('Buscando imagem... Aguarde!')
-        try {
-          // Usar API publica para buscar imagens
-          await reply(`Buscando: "${text}"\nFuncao disponivel via API configuravel.`)
-        } catch {
-          await reply('Servico indisponivel.')
-        }
-        break
-      }
-
       // ==================== COMANDO DESCONHECIDO ====================
       default: {
-        // Silenciosamente ignorar comandos desconhecidos
         break
       }
     }
   } catch (err) {
     console.error(`[DEMI BOT] Erro no comando ${command}:`, err.message)
     await reply('Ocorreu um erro ao processar o comando.').catch(() => {})
-  }
-}
-
-// ============================================
-// FUNCAO PARA EXTRAIR CORPO DA MENSAGEM
-// ============================================
-function extractBody(msg) {
-  const type = getContentType(msg.message)
-  if (!type) return ''
-  if (type === 'conversation') return msg.message.conversation
-  if (type === 'extendedTextMessage') return msg.message.extendedTextMessage?.text
-  if (type === 'imageMessage') return msg.message.imageMessage?.caption
-  if (type === 'videoMessage') return msg.message.videoMessage?.caption
-  if (type === 'documentMessage') return msg.message.documentMessage?.caption
-  return ''
-}
-
-// ============================================
-// FUNCAO PARA DOWNLOAD DE MIDIA
-// ============================================
-async function downloadMediaMessage(msg) {
-  try {
-    const type = getContentType(msg.message)
-    const quotedMsg2 = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
-    let mediaMsg = null
-
-    if (type === 'imageMessage') mediaMsg = msg.message.imageMessage
-    else if (type === 'videoMessage') mediaMsg = msg.message.videoMessage
-    else if (type === 'stickerMessage') mediaMsg = msg.message.stickerMessage
-    else if (type === 'audioMessage') mediaMsg = msg.message.audioMessage
-    else if (type === 'documentMessage') mediaMsg = msg.message.documentMessage
-    else if (quotedMsg2) {
-      const qType = getContentType(quotedMsg2)
-      if (qType === 'imageMessage') mediaMsg = quotedMsg2.imageMessage
-      else if (qType === 'videoMessage') mediaMsg = quotedMsg2.videoMessage
-      else if (qType === 'stickerMessage') mediaMsg = quotedMsg2.stickerMessage
-      else if (qType === 'audioMessage') mediaMsg = quotedMsg2.audioMessage
-    }
-
-    if (!mediaMsg) return null
-
-    const downloadFn = baileys.downloadMediaMessage || baileys.downloadContentFromMessage
-    if (downloadFn) {
-      const stream = await downloadFn(
-        { key: msg.key, message: msg.message },
-        'buffer',
-        {}
-      )
-      return stream
-    }
-    return null
-  } catch (e) {
-    console.error('[DEMI BOT] Erro ao baixar midia:', e.message)
-    return null
   }
 }
 
@@ -2773,6 +2722,16 @@ const authMiddleware = (req, res, next) => {
   if (token === CONFIG.panelPassword) return next()
   res.status(401).json({ error: 'Nao autorizado' })
 }
+
+// Login endpoint (para o painel)
+app.post('/api/login', (req, res) => {
+  const { password } = req.body
+  if (password === CONFIG.panelPassword) {
+    res.json({ success: true, token: CONFIG.panelPassword })
+  } else {
+    res.status(401).json({ error: 'Senha incorreta' })
+  }
+})
 
 // Status do bot
 app.get('/api/bot/status', authMiddleware, (req, res) => {
