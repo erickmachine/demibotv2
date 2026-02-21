@@ -15,7 +15,7 @@ module.exports = {
     {
       name: 'demibot-painel',
       script: 'node_modules/.bin/next',
-      args: 'start -p 3000',
+      args: 'start -p 3001',
       cwd: './',
       watch: false,
       autorestart: true,
@@ -23,7 +23,7 @@ module.exports = {
       restart_delay: 5000,
       env: {
         NODE_ENV: 'production',
-        PORT: 3000,
+        PORT: 3001,
       },
     },
   ],
