@@ -14,6 +14,7 @@ const baileys = require('@whiskeysockets/baileys')
 const makeWASocket = baileys.default || baileys
 const {
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason,
   makeInMemoryStore,
   fetchLatestBaileysVersion,
@@ -21,12 +22,17 @@ const {
   jidNormalizedUser,
   generateForwardMessageContent,
   generateWAMessageFromContent,
-  delay
+  delay,
+  proto
 } = baileys
 
 const pino = require('pino')
 const { Boom } = require('@hapi/boom')
 const axios = require('axios')
+
+// Cache de retry de mensagens (resolve "No sessions")
+const msgRetryCounterCache = new Map()
+const MSG_RETRY_MAX = 5
 
 import fs from 'fs'
 import path from 'path'
@@ -754,35 +760,34 @@ async function startBot() {
 
   const { state, saveCreds } = await useMultiFileAuthState(CONFIG.sessionPath)
   const { version } = await fetchLatestBaileysVersion()
+  const logger = pino({ level: 'silent' })
 
   sock = makeWASocket({
     version,
-    auth: state,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
     printQRInTerminal: true,
-    logger: pino({ level: 'silent' }),
-    browser: ['DEMI BOT', 'Chrome', '4.0.0'],
+    logger,
+    browser: ['DEMI BOT', 'Safari', '3.0'],
     generateHighQualityLinkPreview: false,
     syncFullHistory: false,
     markOnlineOnConnect: true,
     fireInitQueries: true,
     retryRequestDelayMs: 500,
     connectTimeoutMs: 60000,
-    keepAliveIntervalMs: 30000,
+    keepAliveIntervalMs: 25000,
     emitOwnEvents: false,
     shouldSyncHistoryMessage: () => false,
-    patchMessageBeforeSending: (message) => {
-      const requiresPatch = !!(message.buttonsMessage || message.templateMessage || message.listMessage)
-      if (requiresPatch) {
-        message = { viewOnceMessage: { message: { messageContextInfo: { deviceListMetadataVersion: 2, deviceListMetadata: {} }, ...message } } }
-      }
-      return message
-    },
+    msgRetryCounterCache,
+    defaultQueryTimeoutMs: 60000,
     getMessage: async (key) => {
       if (store) {
         const msg = await store.loadMessage(key.remoteJid, key.id)
         return msg?.message || undefined
       }
-      return { conversation: '' }
+      return proto.Message.fromObject({})
     },
   })
 
@@ -808,9 +813,11 @@ async function startBot() {
       console.log('[DEMI BOT] Conectado com sucesso!')
       botStartTime = Date.now()
       incrementStat('connections')
+      // Aguardar sessoes de criptografia serem estabelecidas antes de enviar
+      await sleep(5000)
       await sock.sendMessage(CONFIG.ownerJid, {
         text: `*${CONFIG.botName} conectado com sucesso!*\n\nData: ${formatDate(Date.now())}\nGrupos ativos: ${Object.keys(db.rental.getAll()).length}`
-      }).catch(() => {})
+      }).catch((e) => console.log('[DEMI BOT] Nao enviou msg de boot ao dono:', e.message))
     }
   })
 
@@ -1076,6 +1083,43 @@ async function downloadMediaMessage(msg) {
 }
 
 // ============================================
+// CACHE DE GROUP METADATA (evita timeout em cada mensagem)
+// ============================================
+const groupMetadataCache = new Map()
+const GROUP_CACHE_TTL = 5 * 60 * 1000 // 5 minutos
+
+// Helper global para enviar com retry (usado fora do handleMessage tambem)
+async function safeSend(jid, content, opts = {}) {
+  for (let i = 1; i <= 3; i++) {
+    try {
+      return await sock.sendMessage(jid, content, opts)
+    } catch (e) {
+      const errMsg = e.message || String(e)
+      if (i < 3 && (errMsg.includes('No sessions') || errMsg.includes('not-acceptable') || errMsg.includes('session'))) {
+        await sleep(2000 * i)
+        continue
+      }
+      if (i >= 3) console.error(`[DEMI BOT] safeSend falhou para ${jid}: ${errMsg}`)
+    }
+  }
+}
+
+async function getGroupMetadataCached(chatId) {
+  const cached = groupMetadataCache.get(chatId)
+  if (cached && (Date.now() - cached.ts) < GROUP_CACHE_TTL) {
+    return cached.data
+  }
+  try {
+    const data = await sock.groupMetadata(chatId)
+    groupMetadataCache.set(chatId, { data, ts: Date.now() })
+    return data
+  } catch (e) {
+    console.error('[DEMI BOT] Erro ao buscar metadata do grupo:', e.message)
+    return cached?.data || null
+  }
+}
+
+// ============================================
 // HANDLER PRINCIPAL DE MENSAGENS
 // ============================================
 async function handleMessage(msg) {
@@ -1104,7 +1148,9 @@ async function handleMessage(msg) {
   const quotedMsg = contextInfo.quotedMessage || null
 
   const bodyPreview = extractBody(msg) || ''
-  console.log(`[DEMI BOT] handleMessage | chat: ${chatId} | sender: ${senderNumber} | isGroup: ${isGrp} | isOwner: ${isOwnerNumber(senderNumber)} | body: "${bodyPreview.substring(0, 50)}" | msgType: ${getContentType(msg.message)}`)
+  if (bodyPreview && CONFIG.prefix.some(p => bodyPreview.startsWith(p))) {
+    console.log(`[DEMI BOT] CMD | chat: ${chatId.substring(0, 20)} | sender: ${senderNumber} | body: "${bodyPreview.substring(0, 30)}"`)
+  }
 
   // Dono tem acesso total em qualquer lugar (grupo ou privado)
   const isOwnerMsg = isOwnerNumber(senderNumber)
@@ -1115,7 +1161,6 @@ async function handleMessage(msg) {
   // Verificar aluguel do grupo (dono sempre tem acesso)
   if (isGrp && !isOwnerMsg) {
     const rental = checkRental(chatId)
-    console.log(`[DEMI BOT] Rental check | group: ${chatId} | active: ${rental.active} | reason: ${rental.reason || 'ok'}`)
     if (!rental.active) {
       if (!bodyPreview) return
       const prefixUsed = CONFIG.prefix.find(p => bodyPreview.startsWith(p))
@@ -1138,10 +1183,10 @@ async function handleMessage(msg) {
   const afkData = db.afk.get(senderId)
   if (afkData) {
     db.afk.delete(senderId)
-    await sock.sendMessage(chatId, {
+    await safeSend(chatId, {
       text: `@${senderNumber} voltou! Estava ausente: ${afkData.reason || 'Sem motivo'}`,
       mentions: [senderId]
-    }).catch(() => {})
+    })
   }
 
   // Verificar mencao de AFK
@@ -1149,10 +1194,10 @@ async function handleMessage(msg) {
     for (const mentioned of mentionedJid) {
       const afk = db.afk.get(mentioned)
       if (afk) {
-        await sock.sendMessage(chatId, {
+        await safeSend(chatId, {
           text: `@${formatPhone(mentioned)} esta ausente!\nMotivo: ${afk.reason || 'Nao informado'}\nDesde: ${formatDate(afk.since)}`,
           mentions: [mentioned]
-        }).catch(() => {})
+        })
       }
     }
   }
@@ -1166,7 +1211,7 @@ async function handleMessage(msg) {
   let isBotAdmin = false
 
   if (isGrp) {
-    groupMetadata = await sock.groupMetadata(chatId).catch(() => null)
+    groupMetadata = await getGroupMetadataCached(chatId)
     if (groupMetadata) {
       const admins = groupMetadata.participants.filter(p => p.admin).map(p => p.id)
       isAdmin = admins.includes(senderId)
@@ -1274,42 +1319,8 @@ async function handleMessage(msg) {
   incrementStat('commandsProcessed')
 
   // Helper para responder (com retry robusto)
-  const sendWithRetry = async (content, opts = {}) => {
-    const maxRetries = 3
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        console.log(`[DEMI BOT] Enviando para ${chatId} (tentativa ${attempt})`)
-        if (attempt === 1) {
-          return await sock.sendMessage(chatId, content, { quoted: msg, ...opts })
-        } else {
-          // Na segunda tentativa, envia sem quoted para evitar problemas de referencia
-          return await sock.sendMessage(chatId, content, opts)
-        }
-      } catch (e) {
-        const errMsg = e.message || String(e)
-        const isSessionError = errMsg.includes('No sessions') ||
-          errMsg.includes('session') ||
-          errMsg.includes('not-acceptable') ||
-          errMsg.includes('Bad MAC') ||
-          errMsg.includes('decrypted') ||
-          errMsg.includes('rate-overlimit') ||
-          errMsg.includes('timeout')
-        console.error(`[DEMI BOT] Tentativa ${attempt}/${maxRetries} falhou: ${errMsg}`)
-        if (isSessionError && attempt < maxRetries) {
-          const waitMs = 3000 * attempt
-          console.log(`[DEMI BOT] Aguardando ${waitMs}ms antes do retry...`)
-          await sleep(waitMs)
-          continue
-        }
-        if (attempt >= maxRetries) {
-          console.error(`[DEMI BOT] Falha total ao enviar para ${chatId} apos ${maxRetries} tentativas: ${errMsg}`)
-        }
-      }
-    }
-  }
-
-  const reply = async (txt) => sendWithRetry({ text: txt })
-  const replyMention = async (txt, mentions = []) => sendWithRetry({ text: txt, mentions })
+  const reply = async (txt) => safeSend(chatId, { text: txt }, { quoted: msg })
+  const replyMention = async (txt, mentions = []) => safeSend(chatId, { text: txt, mentions }, { quoted: msg })
 
   // ============================================
   // ROTEADOR DE COMANDOS
