@@ -990,13 +990,28 @@ async function handleGroupEvent(event) {
 // FUNCAO PARA EXTRAIR CORPO DA MENSAGEM
 // ============================================
 function extractBody(msg) {
-  const type = getContentType(msg.message)
+  if (!msg.message) return ''
+  const m = msg.message
+  const type = getContentType(m)
   if (!type) return ''
-  if (type === 'conversation') return msg.message.conversation
-  if (type === 'extendedTextMessage') return msg.message.extendedTextMessage?.text
-  if (type === 'imageMessage') return msg.message.imageMessage?.caption
-  if (type === 'videoMessage') return msg.message.videoMessage?.caption
-  if (type === 'documentMessage') return msg.message.documentMessage?.caption
+  if (type === 'conversation') return m.conversation || ''
+  if (type === 'extendedTextMessage') return m.extendedTextMessage?.text || ''
+  if (type === 'imageMessage') return m.imageMessage?.caption || ''
+  if (type === 'videoMessage') return m.videoMessage?.caption || ''
+  if (type === 'documentMessage') return m.documentMessage?.caption || ''
+  if (type === 'buttonsResponseMessage') return m.buttonsResponseMessage?.selectedButtonId || m.buttonsResponseMessage?.selectedDisplayText || ''
+  if (type === 'listResponseMessage') return m.listResponseMessage?.singleSelectReply?.selectedRowId || m.listResponseMessage?.title || ''
+  if (type === 'templateButtonReplyMessage') return m.templateButtonReplyMessage?.selectedId || ''
+  if (type === 'interactiveResponseMessage') return m.interactiveResponseMessage?.body?.text || ''
+  // Fallback: tentar viewOnceMessage ou ephemeralMessage
+  if (type === 'viewOnceMessage' || type === 'viewOnceMessageV2') {
+    const inner = m.viewOnceMessage?.message || m.viewOnceMessageV2?.message
+    if (inner) return extractBody({ message: inner })
+  }
+  if (type === 'ephemeralMessage') {
+    const inner = m.ephemeralMessage?.message
+    if (inner) return extractBody({ message: inner })
+  }
   return ''
 }
 
@@ -1068,7 +1083,8 @@ async function handleMessage(msg) {
   const quotedParticipant = contextInfo.participant || null
   const quotedMsg = contextInfo.quotedMessage || null
 
-  console.log(`[DEMI BOT] handleMessage | chat: ${chatId} | sender: ${senderNumber} | isGroup: ${isGrp} | isOwner: ${isOwnerNumber(senderNumber)} | mentions: ${mentionedJid.length}`)
+  const bodyPreview = extractBody(msg) || ''
+  console.log(`[DEMI BOT] handleMessage | chat: ${chatId} | sender: ${senderNumber} | isGroup: ${isGrp} | isOwner: ${isOwnerNumber(senderNumber)} | body: "${bodyPreview.substring(0, 50)}" | msgType: ${getContentType(msg.message)}`)
 
   // Dono tem acesso total em qualquer lugar (grupo ou privado)
   const isOwnerMsg = isOwnerNumber(senderNumber)
@@ -1079,12 +1095,12 @@ async function handleMessage(msg) {
   // Verificar aluguel do grupo (dono sempre tem acesso)
   if (isGrp && !isOwnerMsg) {
     const rental = checkRental(chatId)
+    console.log(`[DEMI BOT] Rental check | group: ${chatId} | active: ${rental.active} | reason: ${rental.reason || 'ok'}`)
     if (!rental.active) {
-      const bodyText = extractBody(msg)
-      if (!bodyText) return
-      const prefixUsed = CONFIG.prefix.find(p => bodyText.startsWith(p))
+      if (!bodyPreview) return
+      const prefixUsed = CONFIG.prefix.find(p => bodyPreview.startsWith(p))
       if (!prefixUsed) return
-      const cmd = bodyText.slice(prefixUsed.length).trim().split(/\s+/)[0].toLowerCase()
+      const cmd = bodyPreview.slice(prefixUsed.length).trim().split(/\s+/)[0].toLowerCase()
       if (cmd !== 'ativarbot') return
     }
   }
@@ -2860,13 +2876,46 @@ app.post('/api/broadcast', authMiddleware, async (req, res) => {
   res.json({ success: true, groupsSent: count })
 })
 
-// Iniciar API
-app.listen(CONFIG.apiPort, '0.0.0.0', () => {
-  console.log(`[DEMI BOT] API rodando na porta ${CONFIG.apiPort}`)
+// Iniciar API com tratamento robusto de porta
+function startAPI() {
+  return new Promise((resolve) => {
+    const server = app.listen(CONFIG.apiPort, '0.0.0.0', () => {
+      console.log(`[DEMI BOT] API rodando na porta ${CONFIG.apiPort}`)
+      resolve(server)
+    })
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.log(`[DEMI BOT] Porta ${CONFIG.apiPort} em uso. Tentando liberar com execAsync...`)
+        execAsync(`fuser -k ${CONFIG.apiPort}/tcp`).catch(() => {}).then(() => {
+          setTimeout(() => {
+            const retryServer = app.listen(CONFIG.apiPort, '0.0.0.0', () => {
+              console.log(`[DEMI BOT] API rodando na porta ${CONFIG.apiPort} (apos liberar)`)
+              resolve(retryServer)
+            })
+            retryServer.on('error', (err2) => {
+              console.error(`[DEMI BOT] Falha ao iniciar API mesmo apos liberar porta:`, err2.message)
+              resolve(null)
+            })
+          }, 2000)
+        })
+      } else {
+        console.error('[DEMI BOT] Erro ao iniciar API:', err.message)
+        resolve(null)
+      }
+    })
+  })
+}
+
+// Capturar erros nao tratados para evitar crash do processo
+process.on('uncaughtException', (err) => {
+  console.error('[DEMI BOT] uncaughtException:', err.message)
+})
+process.on('unhandledRejection', (err) => {
+  console.error('[DEMI BOT] unhandledRejection:', err?.message || err)
 })
 
 // ============================================
-// INICIAR BOT
+// INICIAR BOT E API
 // ============================================
 console.log('============================================')
 console.log('  DEMI BOT - WhatsApp Group Bot')
@@ -2874,4 +2923,9 @@ console.log('  Dono: +5592999652961')
 console.log('  Painel: http://129.121.38.161:3000')
 console.log('  API: http://129.121.38.161:5001')
 console.log('============================================')
-startBot()
+
+async function main() {
+  await startAPI()
+  await startBot()
+}
+main()
