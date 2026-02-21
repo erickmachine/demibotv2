@@ -30,9 +30,14 @@ const pino = require('pino')
 const { Boom } = require('@hapi/boom')
 const axios = require('axios')
 
-// Cache de retry de mensagens (resolve "No sessions")
-const msgRetryCounterCache = new Map()
-const MSG_RETRY_MAX = 5
+// Cache de retry de mensagens - implementa interface que Baileys espera (get/set/del)
+class RetryCache {
+  constructor() { this.data = new Map() }
+  get(key) { return this.data.get(key) }
+  set(key, val) { this.data.set(key, val) }
+  del(key) { this.data.delete(key) }
+}
+const msgRetryCounterCache = new RetryCache()
 
 import fs from 'fs'
 import path from 'path'
@@ -49,7 +54,7 @@ const execAsync = promisify(exec)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-// Silenciar erros de decrypt do Baileys (Bad MAC / session errors)
+// Silenciar erros de decrypt do Baileys (ruido normal do Signal Protocol)
 const _origConsoleError = console.error
 console.error = (...args) => {
   const msg = args[0]?.toString?.() || ''
@@ -58,7 +63,9 @@ console.error = (...args) => {
     msg.includes('Failed to decrypt') ||
     msg.includes('Closing open session') ||
     msg.includes('Closing session') ||
-    msg.includes('Session error')
+    msg.includes('Session error') ||
+    msg.includes('Decrypted message with closed session') ||
+    msg.includes('Error: Timed Out')
   ) return
   _origConsoleError.apply(console, args)
 }
@@ -770,18 +777,18 @@ async function startBot() {
     },
     printQRInTerminal: true,
     logger,
-    browser: ['DEMI BOT', 'Safari', '3.0'],
+    browser: ['DEMI BOT', 'Chrome', '4.0.0'],
     generateHighQualityLinkPreview: false,
     syncFullHistory: false,
-    markOnlineOnConnect: true,
-    fireInitQueries: true,
-    retryRequestDelayMs: 500,
-    connectTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000,
+    markOnlineOnConnect: false,
+    fireInitQueries: false,
+    retryRequestDelayMs: 250,
+    connectTimeoutMs: 120_000,
+    keepAliveIntervalMs: 30_000,
+    defaultQueryTimeoutMs: 120_000,
     emitOwnEvents: false,
     shouldSyncHistoryMessage: () => false,
     msgRetryCounterCache,
-    defaultQueryTimeoutMs: 60000,
     getMessage: async (key) => {
       if (store) {
         const msg = await store.loadMessage(key.remoteJid, key.id)
@@ -800,10 +807,13 @@ async function startBot() {
       console.log('[DEMI BOT] Escaneie o QR Code acima para conectar!')
     }
     if (connection === 'close') {
-      const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut
-      console.log('[DEMI BOT] Conexao fechada. Reconectando:', shouldReconnect)
+      const statusCode = (lastDisconnect?.error)?.output?.statusCode
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+      console.log(`[DEMI BOT] Conexao fechada (code: ${statusCode}). Reconectando: ${shouldReconnect}`)
       if (shouldReconnect) {
-        await sleep(3000)
+        // Esperar mais tempo antes de reconectar para dar tempo do WhatsApp liberar
+        const waitTime = statusCode === 408 || statusCode === 503 ? 15000 : 5000
+        await sleep(waitTime)
         startBot()
       } else {
         console.log('[DEMI BOT] Deslogado. Delete a pasta session e escaneie novamente.')
@@ -814,10 +824,17 @@ async function startBot() {
       botStartTime = Date.now()
       incrementStat('connections')
       // Aguardar sessoes de criptografia serem estabelecidas antes de enviar
-      await sleep(5000)
-      await sock.sendMessage(CONFIG.ownerJid, {
-        text: `*${CONFIG.botName} conectado com sucesso!*\n\nData: ${formatDate(Date.now())}\nGrupos ativos: ${Object.keys(db.rental.getAll()).length}`
-      }).catch((e) => console.log('[DEMI BOT] Nao enviou msg de boot ao dono:', e.message))
+      // IMPORTANTE: esperar 15s para dar tempo do Baileys sincronizar as sessoes Signal
+      setTimeout(async () => {
+        try {
+          await sock.sendMessage(CONFIG.ownerJid, {
+            text: `*${CONFIG.botName} conectado com sucesso!*\n\nData: ${formatDate(Date.now())}\nGrupos ativos: ${Object.keys(db.rental.getAll()).length}`
+          })
+          console.log('[DEMI BOT] Mensagem de boot enviada ao dono.')
+        } catch (e) {
+          console.log('[DEMI BOT] Nao enviou msg de boot ao dono:', e.message)
+        }
+      }, 15000)
     }
   })
 
@@ -879,33 +896,33 @@ async function checkAllRentals() {
     if (remaining <= threeDay && remaining > oneDay && !rental.notified3d) {
       rental.notified3d = true
       db.rental.set(groupId, rental)
-      await sock.sendMessage(groupId, {
+      await safeSend(groupId, {
         text: `*[DEMI BOT - AVISO DE EXPIRACAO]*\n\nO plano deste grupo expira em *3 dias*!\nTempo restante: ${timeRemaining(rental.expireAt)}\n\nRenove com o dono para continuar usando o bot.`
-      }).catch(() => {})
+      })
     }
 
     if (remaining <= oneDay && remaining > oneHour && !rental.notified1d) {
       rental.notified1d = true
       db.rental.set(groupId, rental)
-      await sock.sendMessage(groupId, {
+      await safeSend(groupId, {
         text: `*[DEMI BOT - AVISO URGENTE]*\n\nO plano deste grupo expira em *1 dia*!\nTempo restante: ${timeRemaining(rental.expireAt)}\n\nRenove AGORA para nao perder as funcoes!`
-      }).catch(() => {})
+      })
     }
 
     if (remaining <= oneHour && remaining > 0 && !rental.notified1h) {
       rental.notified1h = true
       db.rental.set(groupId, rental)
-      await sock.sendMessage(groupId, {
+      await safeSend(groupId, {
         text: `*[DEMI BOT - ULTIMO AVISO]*\n\nO plano deste grupo expira em *1 hora*!\nTempo restante: ${timeRemaining(rental.expireAt)}\n\nApos expirar, o bot deixara de funcionar neste grupo.`
-      }).catch(() => {})
+      })
     }
 
     if (remaining <= 0) {
       rental.active = false
       db.rental.set(groupId, rental)
-      await sock.sendMessage(groupId, {
+      await safeSend(groupId, {
         text: `*[DEMI BOT - PLANO EXPIRADO]*\n\nO plano deste grupo expirou!\n\nO bot nao respondera mais comandos aqui.\nEntre em contato com o dono para renovar:\nwa.me/${CONFIG.ownerNumber}`
-      }).catch(() => {})
+      })
     }
   }
 }
@@ -933,9 +950,9 @@ async function processScheduledMessages() {
 
       try {
         if (msg.media) {
-          await sock.sendMessage(groupId, { image: { url: msg.media }, caption: msg.text || '' })
+          await safeSend(groupId, { image: { url: msg.media }, caption: msg.text || '' })
         } else {
-          await sock.sendMessage(groupId, { text: msg.text })
+          await safeSend(groupId, { text: msg.text })
         }
       } catch (e) {
         console.error('[DEMI BOT] Erro ao enviar mensagem agendada:', e.message)
@@ -955,26 +972,26 @@ async function handleGroupEvent(event) {
   // Permitir eventos se o aluguel esta ativo
   if (!rental.active) return
 
-  const metadata = await sock.groupMetadata(groupId).catch(() => null)
+  const metadata = await getGroupMetadataCached(groupId)
   if (!metadata) return
 
   for (const participant of participants) {
     if (action === 'add') {
       if (isBlacklisted(participant)) {
         await sock.groupParticipantsUpdate(groupId, [participant], 'remove').catch(() => {})
-        await sock.sendMessage(groupId, {
+        await safeSend(groupId, {
           text: `O numero @${formatPhone(participant)} esta na lista negra e foi removido automaticamente.`,
           mentions: [participant]
-        }).catch(() => {})
+        })
         continue
       }
 
       if (config.antifake && !participant.startsWith('55')) {
         await sock.groupParticipantsUpdate(groupId, [participant], 'remove').catch(() => {})
-        await sock.sendMessage(groupId, {
+        await safeSend(groupId, {
           text: `Numero estrangeiro detectado: @${formatPhone(participant)}. Removido pelo anti-fake.`,
           mentions: [participant]
-        }).catch(() => {})
+        })
         continue
       }
 
@@ -986,16 +1003,16 @@ async function handleGroupEvent(event) {
         try { ppUrl = await sock.profilePictureUrl(participant, 'image') } catch {}
 
         if (ppUrl) {
-          await sock.sendMessage(groupId, {
+          await safeSend(groupId, {
             image: { url: ppUrl },
             caption: welcomeText,
             mentions: [participant]
-          }).catch(() => {})
+          })
         } else {
-          await sock.sendMessage(groupId, {
+          await safeSend(groupId, {
             text: welcomeText,
             mentions: [participant]
-          }).catch(() => {})
+          })
         }
       }
     }
@@ -1004,10 +1021,10 @@ async function handleGroupEvent(event) {
       if (config.goodbye) {
         const goodbyeText = config.goodbyeMsg ||
           `@${formatPhone(participant)} saiu do grupo *${metadata.subject}*. Ate mais!`
-        await sock.sendMessage(groupId, {
+        await safeSend(groupId, {
           text: goodbyeText,
           mentions: [participant]
-        }).catch(() => {})
+        })
       }
     }
   }
@@ -1092,14 +1109,18 @@ const GROUP_CACHE_TTL = 5 * 60 * 1000 // 5 minutos
 async function safeSend(jid, content, opts = {}) {
   for (let i = 1; i <= 3; i++) {
     try {
-      return await sock.sendMessage(jid, content, opts)
+      // Na primeira tentativa, usa as opcoes originais (com quoted etc)
+      // Nas tentativas seguintes, envia SEM quoted para evitar que a msg quoted
+      // com sessao corrompida cause "No sessions"
+      const sendOpts = i === 1 ? opts : {}
+      return await sock.sendMessage(jid, content, sendOpts)
     } catch (e) {
       const errMsg = e.message || String(e)
-      if (i < 3 && (errMsg.includes('No sessions') || errMsg.includes('not-acceptable') || errMsg.includes('session'))) {
-        await sleep(2000 * i)
+      console.error(`[DEMI BOT] safeSend tentativa ${i}/3 para ${jid.substring(0, 20)}: ${errMsg}`)
+      if (i < 3) {
+        await sleep(3000 * i)
         continue
       }
-      if (i >= 3) console.error(`[DEMI BOT] safeSend falhou para ${jid}: ${errMsg}`)
     }
   }
 }
@@ -1237,15 +1258,15 @@ async function handleMessage(msg) {
         if (warns >= maxW) {
           await sock.groupParticipantsUpdate(chatId, [senderId], 'remove').catch(() => {})
           addToBlacklist(senderNumber, 'Max advertencias por links', 'bot')
-          await sock.sendMessage(chatId, {
+          await safeSend(chatId, {
             text: `@${senderNumber} foi removido por excesso de advertencias (${warns}/${maxW}).\nMotivo: Envio de links.`,
             mentions: [senderId]
-          }).catch(() => {})
+          })
         } else {
-          await sock.sendMessage(chatId, {
+          await safeSend(chatId, {
             text: `@${senderNumber}, links nao sao permitidos neste grupo!\nAdvertencia ${warns}/${maxW}`,
             mentions: [senderId]
-          }).catch(() => {})
+          })
         }
         return
       }
@@ -1258,10 +1279,10 @@ async function handleMessage(msg) {
         await sock.sendMessage(chatId, { delete: msg.key }).catch(() => {})
         const warns = addWarning(chatId, senderId, `Palavrao: ${found}`)
         const maxW = config.maxWarnings || 3
-        await sock.sendMessage(chatId, {
+        await safeSend(chatId, {
           text: `@${senderNumber}, palavroes nao sao permitidos!\nAdvertencia ${warns}/${maxW}`,
           mentions: [senderId]
-        }).catch(() => {})
+        })
         if (warns >= maxW && isBotAdmin) {
           await sock.groupParticipantsUpdate(chatId, [senderId], 'remove').catch(() => {})
           addToBlacklist(senderNumber, 'Max advertencias por palavroes', 'bot')
@@ -1273,10 +1294,10 @@ async function handleMessage(msg) {
     // Limite de texto
     if (config.limitexto > 0 && body.length > config.limitexto) {
       await sock.sendMessage(chatId, { delete: msg.key }).catch(() => {})
-      await sock.sendMessage(chatId, {
+      await safeSend(chatId, {
         text: `@${senderNumber}, mensagem muito longa! Limite: ${config.limitexto} caracteres.`,
         mentions: [senderId]
-      }).catch(() => {})
+      })
       return
     }
 
@@ -1290,10 +1311,10 @@ async function handleMessage(msg) {
       try {
         const media = await downloadMediaMessage(msg)
         if (media) {
-          await sock.sendMessage(chatId, {
+          await safeSend(chatId, {
             sticker: media,
             mimetype: 'image/webp'
-          }).catch(() => {})
+          })
         }
       } catch {}
     }
@@ -1414,7 +1435,7 @@ async function handleMessage(msg) {
         let count = 0
         for (const [gid, rental] of Object.entries(allRentals)) {
           if (rental.active) {
-            await sock.sendMessage(gid, { text: `*[BROADCAST - ${CONFIG.botName}]*\n\n${text}` }).catch(() => {})
+            await safeSend(gid, { text: `*[BROADCAST - ${CONFIG.botName}]*\n\n${text}` })
             count++
             await sleep(1000)
           }
@@ -1653,7 +1674,7 @@ async function handleMessage(msg) {
         let tagText = text || 'Atencao todos!'
         tagText += '\n\n'
         participants.forEach(p => { tagText += `@${formatPhone(p)} ` })
-        await sock.sendMessage(chatId, { text: tagText, mentions: participants })
+        await safeSend(chatId, { text: tagText, mentions: participants })
         break
       }
 
@@ -2314,7 +2335,7 @@ async function handleMessage(msg) {
         try {
           const media = await downloadMediaMessage(msg)
           if (media) {
-            await sock.sendMessage(chatId, {
+            await safeSend(chatId, {
               sticker: media,
               mimetype: 'image/webp',
               stickerMetadata: { 'sticker-pack-name': CONFIG.botName, 'sticker-pack-publisher': 'DEMI' }
@@ -2332,7 +2353,7 @@ async function handleMessage(msg) {
           const media = await downloadMediaMessage(msg)
           if (media) {
             const imgBuffer = await sharp(media).png().toBuffer()
-            await sock.sendMessage(chatId, { image: imgBuffer, caption: 'Figurinha convertida!' })
+            await safeSend(chatId, { image: imgBuffer, caption: 'Figurinha convertida!' })
           }
         } catch (e) {
           await reply('Erro: ' + e.message)
@@ -2346,7 +2367,7 @@ async function handleMessage(msg) {
           const apiUrl = `https://api.lolhuman.xyz/api/ttp?apikey=free&text=${encodeURIComponent(text)}`
           const response = await axios.get(apiUrl, { responseType: 'arraybuffer' }).catch(() => null)
           if (response?.data) {
-            await sock.sendMessage(chatId, {
+            await safeSend(chatId, {
               sticker: Buffer.from(response.data),
               mimetype: 'image/webp'
             })
@@ -2367,7 +2388,7 @@ async function handleMessage(msg) {
         try {
           const media = await downloadMediaMessage(msg)
           if (media) {
-            await sock.sendMessage(chatId, {
+            await safeSend(chatId, {
               sticker: media,
               mimetype: 'image/webp',
               stickerMetadata: { 'sticker-pack-name': packName, 'sticker-pack-publisher': authorName }
@@ -2391,7 +2412,7 @@ async function handleMessage(msg) {
             const audioUrl = `https://api.lolhuman.xyz/api/ytaudio?apikey=free&url=${encodeURIComponent(videoUrl)}`
             const audio = await axios.get(audioUrl, { responseType: 'arraybuffer' }).catch(() => null)
             if (audio?.data) {
-              await sock.sendMessage(chatId, {
+              await safeSend(chatId, {
                 audio: Buffer.from(audio.data),
                 mimetype: 'audio/mp4',
                 ptt: false
@@ -2452,7 +2473,7 @@ async function handleMessage(msg) {
           if (response?.data?.result) {
             const images = Array.isArray(response.data.result) ? response.data.result : [response.data.result]
             for (const img of images.slice(0, 3)) {
-              await sock.sendMessage(chatId, { image: { url: img }, caption: `Pinterest: ${text}` }).catch(() => {})
+              await safeSend(chatId, { image: { url: img }, caption: `Pinterest: ${text}` })
             }
           } else {
             await reply('Nenhuma imagem encontrada.')
@@ -2579,7 +2600,7 @@ async function handleMessage(msg) {
         const profileText = `*Perfil de @${formatPhone(targetProfile)}*\n\nCargo: ${roleP}\nGold: ${goldP}\nMensagens: ${actP.messages}\nAdvertencias: ${warnP.length}\nNumero: ${formatPhone(targetProfile)}`
 
         if (ppUrlP) {
-          await sock.sendMessage(chatId, { image: { url: ppUrlP }, caption: profileText, mentions: [targetProfile] })
+          await safeSend(chatId, { image: { url: ppUrlP }, caption: profileText, mentions: [targetProfile] })
         } else {
           await replyMention(profileText, [targetProfile])
         }
@@ -2741,7 +2762,7 @@ async function handleMessage(msg) {
               break
             }
           }
-          await sock.sendMessage(chatId, { image: processed, caption: `Efeito: ${command}` })
+          await safeSend(chatId, { image: processed, caption: `Efeito: ${command}` })
         } catch (e) {
           await reply('Erro: ' + e.message)
         }
@@ -2795,10 +2816,27 @@ app.get('/api/bot/status', authMiddleware, (req, res) => {
   })
 })
 
-// Listar grupos
+// Cache de grupos para evitar timeout repetido no groupFetchAllParticipating
+let cachedGroups = []
+let cachedGroupsTime = 0
+const GROUPS_CACHE_TTL = 2 * 60 * 1000 // 2 minutos
+
 app.get('/api/groups', authMiddleware, async (req, res) => {
   try {
-    const groups = await sock?.groupFetchAllParticipating().catch(() => ({}))
+    // Se cache ainda valido, retorna direto
+    if (cachedGroups.length > 0 && (Date.now() - cachedGroupsTime) < GROUPS_CACHE_TTL) {
+      // Atualiza apenas rental info (e leve)
+      const list = cachedGroups.map(g => ({
+        ...g,
+        rental: getRentalInfo(g.id),
+        config: getGroupConfig(g.id),
+      }))
+      return res.json(list)
+    }
+    // Buscar grupos com timeout de 30s
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 30000))
+    const fetchPromise = sock?.groupFetchAllParticipating() || Promise.resolve({})
+    const groups = await Promise.race([fetchPromise, timeoutPromise]).catch(() => ({}))
     const list = Object.values(groups || {}).map(g => ({
       id: g.id,
       name: g.subject,
@@ -2806,8 +2844,21 @@ app.get('/api/groups', authMiddleware, async (req, res) => {
       rental: getRentalInfo(g.id),
       config: getGroupConfig(g.id),
     }))
+    // Guardar no cache (sem rental/config para manter leve)
+    cachedGroups = list.map(g => ({ id: g.id, name: g.name, members: g.members }))
+    cachedGroupsTime = Date.now()
     res.json(list)
-  } catch {
+  } catch (e) {
+    console.error('[DEMI BOT] Erro ao listar grupos:', e.message)
+    // Retorna cache antigo se tiver, senao array vazio
+    if (cachedGroups.length > 0) {
+      const list = cachedGroups.map(g => ({
+        ...g,
+        rental: getRentalInfo(g.id),
+        config: getGroupConfig(g.id),
+      }))
+      return res.json(list)
+    }
     res.json([])
   }
 })
@@ -2889,7 +2940,7 @@ app.get('/api/stats', authMiddleware, (req, res) => {
 app.post('/api/send', authMiddleware, async (req, res) => {
   const { groupId, message } = req.body
   try {
-    await sock.sendMessage(groupId, { text: message })
+    await safeSend(groupId, { text: message })
     res.json({ success: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -2903,8 +2954,9 @@ app.post('/api/broadcast', authMiddleware, async (req, res) => {
   let count = 0
   for (const [gid, rental] of Object.entries(allRentals)) {
     if (rental.active) {
-      await sock.sendMessage(gid, { text: `*[BROADCAST]*\n\n${message}` }).catch(() => {})
+      await safeSend(gid, { text: `*[BROADCAST]*\n\n${message}` })
       count++
+      await sleep(1000) // evitar rate limit
     }
   }
   res.json({ success: true, groupsSent: count })
@@ -2942,10 +2994,13 @@ function startAPI() {
 
 // Capturar erros nao tratados para evitar crash do processo
 process.on('uncaughtException', (err) => {
+  if (err.message?.includes('Timed Out') || err.message?.includes('Bad MAC')) return
   console.error('[DEMI BOT] uncaughtException:', err.message)
 })
 process.on('unhandledRejection', (err) => {
-  console.error('[DEMI BOT] unhandledRejection:', err?.message || err)
+  const msg = err?.message || String(err)
+  if (msg.includes('Timed Out') || msg.includes('No sessions') || msg.includes('Bad MAC')) return
+  console.error('[DEMI BOT] unhandledRejection:', msg)
 })
 
 // ============================================
@@ -2953,7 +3008,7 @@ process.on('unhandledRejection', (err) => {
 // ============================================
 console.log('============================================')
 console.log('  DEMI BOT - WhatsApp Group Bot')
-console.log('  Dono: +5592999652961')
+console.log('  Dono: +559299652961')
 console.log('  Painel: http://129.121.38.161:3000')
 console.log('  API: http://129.121.38.161:5001')
 console.log('============================================')
