@@ -744,6 +744,14 @@ let sock = null
 let botStartTime = Date.now()
 
 async function startBot() {
+  // Limpar listeners do sock anterior para evitar duplicacao
+  if (sock) {
+    try {
+      sock.ev.removeAllListeners()
+      sock.ws?.close()
+    } catch {}
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(CONFIG.sessionPath)
   const { version } = await fetchLatestBaileysVersion()
 
@@ -753,10 +761,22 @@ async function startBot() {
     printQRInTerminal: true,
     logger: pino({ level: 'silent' }),
     browser: ['DEMI BOT', 'Chrome', '4.0.0'],
-    generateHighQualityLinkPreview: true,
+    generateHighQualityLinkPreview: false,
     syncFullHistory: false,
     markOnlineOnConnect: true,
-    retryRequestDelayMs: 250,
+    fireInitQueries: true,
+    retryRequestDelayMs: 500,
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 30000,
+    emitOwnEvents: false,
+    shouldSyncHistoryMessage: () => false,
+    patchMessageBeforeSending: (message) => {
+      const requiresPatch = !!(message.buttonsMessage || message.templateMessage || message.listMessage)
+      if (requiresPatch) {
+        message = { viewOnceMessage: { message: { messageContextInfo: { deviceListMetadataVersion: 2, deviceListMetadata: {} }, ...message } } }
+      }
+      return message
+    },
     getMessage: async (key) => {
       if (store) {
         const msg = await store.loadMessage(key.remoteJid, key.id)
@@ -1253,40 +1273,43 @@ async function handleMessage(msg) {
 
   incrementStat('commandsProcessed')
 
-  // Helper para responder (com retry para erro "No sessions")
-  const reply = async (txt) => {
-    try {
-      await sock.sendMessage(chatId, { text: txt }, { quoted: msg })
-    } catch (e) {
-      if (e.message === 'No sessions' || e.message?.includes('session')) {
-        try {
-          await delay(1500)
-          await sock.sendMessage(chatId, { text: txt })
-        } catch (e2) {
-          console.error('[DEMI BOT] Falha no retry:', e2.message)
+  // Helper para responder (com retry robusto)
+  const sendWithRetry = async (content, opts = {}) => {
+    const maxRetries = 3
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`[DEMI BOT] Enviando para ${chatId} (tentativa ${attempt})`)
+        if (attempt === 1) {
+          return await sock.sendMessage(chatId, content, { quoted: msg, ...opts })
+        } else {
+          // Na segunda tentativa, envia sem quoted para evitar problemas de referencia
+          return await sock.sendMessage(chatId, content, opts)
         }
-      } else {
-        console.error('[DEMI BOT] Erro ao responder:', e.message)
+      } catch (e) {
+        const errMsg = e.message || String(e)
+        const isSessionError = errMsg.includes('No sessions') ||
+          errMsg.includes('session') ||
+          errMsg.includes('not-acceptable') ||
+          errMsg.includes('Bad MAC') ||
+          errMsg.includes('decrypted') ||
+          errMsg.includes('rate-overlimit') ||
+          errMsg.includes('timeout')
+        console.error(`[DEMI BOT] Tentativa ${attempt}/${maxRetries} falhou: ${errMsg}`)
+        if (isSessionError && attempt < maxRetries) {
+          const waitMs = 3000 * attempt
+          console.log(`[DEMI BOT] Aguardando ${waitMs}ms antes do retry...`)
+          await sleep(waitMs)
+          continue
+        }
+        if (attempt >= maxRetries) {
+          console.error(`[DEMI BOT] Falha total ao enviar para ${chatId} apos ${maxRetries} tentativas: ${errMsg}`)
+        }
       }
     }
   }
 
-  const replyMention = async (txt, mentions = []) => {
-    try {
-      await sock.sendMessage(chatId, { text: txt, mentions }, { quoted: msg })
-    } catch (e) {
-      if (e.message === 'No sessions' || e.message?.includes('session')) {
-        try {
-          await delay(1500)
-          await sock.sendMessage(chatId, { text: txt, mentions })
-        } catch (e2) {
-          console.error('[DEMI BOT] Falha no retry mention:', e2.message)
-        }
-      } else {
-        console.error('[DEMI BOT] Erro ao responder com mention:', e.message)
-      }
-    }
-  }
+  const reply = async (txt) => sendWithRetry({ text: txt })
+  const replyMention = async (txt, mentions = []) => sendWithRetry({ text: txt, mentions })
 
   // ============================================
   // ROTEADOR DE COMANDOS
